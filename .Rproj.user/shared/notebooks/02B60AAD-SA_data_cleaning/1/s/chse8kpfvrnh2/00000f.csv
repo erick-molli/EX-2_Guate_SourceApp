@@ -1,0 +1,8 @@
+"0","hapin <- hapin %>% rename(filter_id = ""h41_m_ecm_fid"", dup1_filterid = ""h41b_filter1"", dup2_filterid = ""h41b_filter2"","
+"0","                         blank_filterid = ""h41_b_ecm_fid"", date = ""h41_date"",  arm = ""trt_blinded"", pm25 = ""ECM_grav_neph_conc_M"","
+"0","                         bc = ""ECM_bc_conc_M"") %>% "
+"0","  select(-concatenated) %>% "
+"0","  mutate(arm = case_when(arm == 'R' ~ 'Control', arm == 'Q' ~ 'Intervention', TRUE ~ arm))"
+"0",""
+"0","#Set date in date format"
+"0","hapin <- hapin %>% mutate(date = mdy(date))"

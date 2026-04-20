@@ -1,0 +1,2 @@
+"0","#Delete observation with filter id: 3M53864."
+"0","hapin_filters <- hapin_filters %>% filter(filter_id != ""3M53864"")"

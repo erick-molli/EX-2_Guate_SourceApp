@@ -1,0 +1,2 @@
+"0","hapin <- read_csv(here(""data"", ""raw-data"", ""HAPIN_EX17_Guatemala_20230728.csv""))"
+"0","xrflist <- read_csv(here(""data"", ""raw-data"", ""sa_filters_emollinedo.csv""))"

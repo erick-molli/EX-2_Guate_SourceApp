@@ -1,0 +1,2 @@
+"0","#Combining the `personal` and `dup` dataframes into a single one, using `bind_rows()`"
+"0","hapin_filters <- bind_rows(hapin_personal, hapin_dup1, hapin_dup2)"

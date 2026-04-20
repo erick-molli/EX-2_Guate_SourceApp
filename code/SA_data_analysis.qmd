@@ -1,0 +1,734 @@
+---
+title: "Source apportionment Data analysis"
+author: Erick E. Mollinedo
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+format: html
+editor: visual
+---
+
+Packages needed for this script:
+
+```{r}
+library(readxl)
+library(readr)
+library(here)
+library(tidyverse)
+library(gt)
+library(vtable)
+library(rstatix)
+library(ggpubr)
+library(ggpattern)
+library(treemap)
+```
+
+## INPUT DATA ANALYSES
+
+### Description of samples
+
+First, describing the number of filters per study arm and by visit used for source apportionment analysis
+
+```{r}
+#Load the HAPIN sample filters dataframe
+hapin_filters <- read_csv(here("data", "processed-data", "hapin_samples.csv"))
+```
+
+Now, deleting the filter sample with missing PM2.5 and BC concentrations.
+
+```{r}
+#Delete observation with filter id: 3M53864.
+hapin_filters <- hapin_filters %>% filter(filter_id != "3M53864")
+```
+
+Finally, creating a table that summarizes the number of filters per visit and study arm
+
+```{r}
+#Create data frame that summarizes the filter samples
+summary_filters <- hapin_filters %>%
+  count(arm, timepoint) %>%
+  pivot_wider(names_from = timepoint, values_from = n, values_fill = list(n = 0))
+
+#Rename arm to Study Arm
+summary_filters <- summary_filters %>% rename("Study Arm" = arm)
+
+#Save the table as .RDS file
+saveRDS(summary_filters, file = here("output", "summary_filters.RDS"))
+
+#Create table using gt
+gt_filters <- summary_filters %>% gt() %>% 
+  tab_spanner(label = "Time point", columns = c(BL, BLP1, P1, P1P2, P2, P2B1))
+
+#View table
+gt_filters
+```
+
+### Concentrations statistical summaries
+
+First load the `concentration` data files.
+
+```{r}
+#Load the files
+concentration <- read_csv(here("data", "processed-data", "concentration.csv")) #Only species for source app analysis
+concentration_full <- read_csv(here("data", "processed-data", "concentrations_full.csv")) #All chemical species
+```
+
+Delete the missing concentration from the `concentration_full` data frame.
+
+```{r}
+#Delete observation with filter id: 3M53864.
+concentration_full <- concentration_full %>% filter(filter_id != "3M53864")
+```
+
+Create a summary statistics table for all the chemical species, by study arm, and including baseline measurements sepparately. This is done using the `vtable` package. After, a summary statistics table with the chemical species selected, first overall and then by study group.
+
+```{r}
+#ALL CHEMICAL SPECIES
+#Create a summary table, this divides into BL, Intervention and Control
+sumtable(concentration_full, group = 'group', group.long = T, add.median = T)
+
+#Create a summary table, but with all observations overall
+sumtable(concentration_full, add.median = T)
+
+#FILTERED CHEMICAL SPECIES
+#Create a summary table, this divides into BL, Intervention and Control
+sumtable(concentration, group = 'group', group.long = T, add.median = T)
+
+#Create a summary table, but with all observations overall
+sumtable(concentration, add.median = T)
+```
+
+Make some edits to the `concentration` dataframe to run the statistical analyses.
+
+```{r}
+#Exclude the arm and fueltype variables
+concentration_filtered <- concentration %>% select(-c(arm, fueltype))
+
+#Pivot longer for boxplots
+options(scipen = 999) #to remove scientific notation for smaller values (i.e. changes from 1*10-3 to 0.001)
+concentration_longer <- concentration_filtered %>% 
+  pivot_longer(cols = -c(filter_id, group),
+               names_to = "species", values_to = "concentration")
+
+#Set order of species for factor conversion
+#level_order <- c("Mg", "Al", "Si", "S", "K", "Ca", "Ti", "Mn", "Fe", "Zn", "Cl", "Na", "BC", "PM25")
+level_order <- c("Zn", "Mn", "Ti", "Na", "Mg", "Fe", "S", "Ca", "Al", "Si", "K", "Cl", "BC", "PM25")
+
+#Convert species to factors and assign order specified before
+concentration_longer$species <- factor(concentration_longer$species, levels = level_order)
+```
+
+Compute the paired Wilcoxon test. First, creating a function.
+
+```{r}
+#Function to perform the Wilcoxon test
+perform_wilcoxon <- function(species_data) {
+  wilcox.test(concentration ~ group, data = species_data, subset = group %in% c("Intervention", "Control"))
+}
+
+#Apply the function to each species
+results_wilcoxon <- by(concentration_longer, concentration_longer$species, perform_wilcoxon)
+
+print(results_wilcoxon)
+```
+
+Create boxplots to visualize the differences in concentrations for each chemical species. First, doing the t-test to assess differences between study arm.
+
+```{r}
+#Conduct the t-test of concentration-fuel_type (Use the rstatix package)
+stat.test <- concentration_longer %>% 
+  filter(group != "Baseline") %>% #To create the statistical significance only between Control and Intervention
+  group_by(species) %>% 
+  t_test(concentration ~ group) %>% 
+  add_significance(cutpoints = c(0, 0.05, 1), symbols = c("**", "ns")) #to add the significance values
+
+#Add the position coordinates
+stat.test <- stat.test %>% 
+  add_x_position(x= "species", dodge = 0.5) %>% #x position is species, and the length of significance bar is 0.5
+  add_y_position(y.trans = function(x){log10(x)}) #add y position, in this case specify using a function that it is in log base 10 scale
+```
+
+Now, creating a plot in black and white, this is the one used for the manuscript.
+
+```{r}
+#Create a pattern
+studyarm_patterns <- c("Baseline" = "none",
+                       "Control" = "stripe",
+                       "Intervention" = "circle")
+
+#Boxplot with patterns instead of colors
+concentration_longer %>%
+  ggplot() +
+  geom_boxplot_pattern(aes(x = species, y = concentration, pattern = group),
+    fill = "white",
+    colour = "black",
+    pattern_fill = "black",
+    pattern_density = 0.1,
+    pattern_spacing = 0.01) +
+  scale_pattern_manual(values = studyarm_patterns) +
+  xlab(expression(Chemical~species)) +
+  ylab(expression(Concentration~(ug/m^3))) +
+  scale_y_log10(breaks = c(0.01, 0.1, 1.0, 10.0, 100.0, 1000.0), 
+                labels = c(0.01, 0.1, 1, 10, 100, 1000))+
+  scale_x_discrete(labels = c("Zn", "Mn", "Ti", "Na", "Mg", "Fe", "S", "Ca",
+                              "Al", "Si", "K", "Cl", "BC", "PM2.5")) +
+  guides(pattern = guide_legend(title = "Study Group")) +
+  theme_test(base_size = 14) +
+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.004)
+
+#Save plot using ggsave
+ggsave(here("figures", "figure1_b&w.png"), plot = last_plot(), width = 20, height = 10, units = "cm")
+```
+
+If the Figure above needs to be in color, use the code below:
+
+```{r}
+#Create color palette for the boxplots
+studyarm_colors <- c("Baseline" = "skyblue",
+                   "Control" = "orangered2",
+                   "Intervention" = "plum3")
+
+#Create the boxplot (in color)
+concentration_longer %>% #filter(group != "BL") %>% (In case just want to show Control-Intervention post-randomization)
+ggplot()+
+  geom_boxplot(aes(x= species, y= concentration, fill= group))+
+  scale_fill_manual(values = studyarm_colors)+ #Apply the color palette created above
+  xlab(expression(Chemical~species))+ #Label the x-axis
+  ylab(expression(Concentration~(ug/m^3)))+ #Label the y-axis
+  scale_y_log10(breaks= c(0.01, 0.1, 1.0, 10.0, 100.0, 1000.0), labels= c(0.01, 0.1, 1, 10, 100, 1000))+
+  scale_x_discrete(labels= c("Mg", "Al", "Si", "S", "K", "Ca", "Ti", "Mn", "Fe", "Zn", "Cl", "Na", "BC", "PM2.5"))+
+  scale_x_discrete(labels= c("Zn", "Mn", "Ti", "Na", "Mg", "Fe", "S", "Ca", "Al", "Si", "K", "Cl", "BC", "PM2.5"))+
+  guides(fill= guide_legend(title= "Study Group"))+ #Change legend from group to Study arm
+  theme_bw(base_size = 14)+ #Select the theme and size of x and y labels
+  stat_pvalue_manual(stat.test, label = "p.signif", tip.length = 0.004) #Add the significance bars, use 'p.signif' to add *** or 'ns'
+
+#Save plot using ggsave
+ggsave(here("figures", "figure1.png"), plot = last_plot(), width = 20, height = 10, units = "cm")
+```
+
+
+## OUTPUT DATA ANALYSES
+
+### Q(True)/Q(Exp) plot
+
+Now I will create a plot that explains the Qtrue/Qexp ratio according to the number of factors. First, I will load the `q-factors` csv file that comes from the diagnostics files.
+
+```{r}
+#Loading the data for Q plot
+q_data <- read_csv(here("data", "raw-data", "q-factors.csv"))
+
+#Exploring the df
+str(q_data)
+
+#Make the Factors as `factors`
+as.factor(q_data$fact)
+```
+
+Now, creating a plot using geom_point and geom_line.
+
+```{r}
+#Create a Qtrue/Qexp ratio plot
+ggplot(q_data, aes(x= fact, y= ratio))+
+  geom_point(size= 4, color= "firebrick")+
+  geom_line()+
+  theme_bw()+
+  labs(x= "Number of Factors", y= "Q(true)/Q(exp)")+
+  ggtitle("Q(True)/Q(Exp) plot by Number of factors")+
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size= 17, hjust = 0.5))+
+  ylim(1, 18)
+
+#Save plot using ggsave
+ggsave(here("figures", "qqplot.png"), plot = last_plot(), width = 20, height = 12, units = "cm")
+```
+
+### Factor profiles
+
+The following part is to create a plot that is visually more clear than the plot obtained from the EPA PMF 5.0 software. First, load the `species` data, which is obtained from the '% of species sum' section from the `HAPIN4_base` output file of the software, and then perform some edits.
+
+```{r}
+#Load the species concentrations df, obtained from the PMF analysis
+species <- read_csv(here("data", "raw-data", "species.csv"))
+
+#Pivot longer
+spec_longer <- species %>% 
+  pivot_longer(cols = -species,
+               names_to = "Factor", values_to = "Percent")
+
+#Rename the columns
+spec_longer <- spec_longer %>% 
+  mutate(Factor = case_when(Factor == "factor_1" ~ "Factor 1",
+                            Factor == "factor_2" ~ "Factor 2",
+                            Factor == "factor_3" ~ "Factor 3",
+                            Factor == "factor_4" ~ "Factor 4"))
+```
+
+First, set the order of the species, and set as factor object.
+
+```{r}
+#Set new level order
+level_order2 <- c("Mg", "Al", "Si", "S", "K", "Ca", "Ti", "Mn", "Fe", "Zn", "Cl", "Na", "BC", "PM2.5")
+
+#Convert species to factors and assign order specified before
+spec_longer$species <- factor(spec_longer$species, levels = level_order2)
+```
+
+Now, create a graph of profiles (In black and white) by each of the four factors.
+
+```{r}
+#Create the Black and white gradient
+factor_colors <- c("Factor 1" = "grey75",
+                   "Factor 2" = "grey50",
+                   "Factor 3" = "grey25",
+                   "Factor 4" = "grey0")
+
+#Create the plot
+ggplot(spec_longer, aes(x= species, y= Percent, fill= Factor))+
+  geom_col()+
+  facet_grid(Factor ~., scales = "fixed")+ #Set the grid and make the scale the same for all Factors
+  scale_y_continuous(position = "left")+ #Set the y-scale axis on the left
+  labs(x= "Species", y= "Proportion of Species (%)")+ #Change the labels
+  scale_x_discrete(labels= c("Mg", "Al", "Si", "S", "K", "Ca", "Ti", "Mn", "Fe", "Cl", "Na", "BC", "PM2.5"))+ #Manually label the x-axis
+  #ggtitle("Species Profiles by a Four-factor model")+
+  scale_fill_manual(values = factor_colors, #Set the color palette created before
+                    labels= c("Factor 1" = "Biomass", #Rename factors to their corresponding source names
+                              "Factor 2" = "Crustal",
+                              "Factor 3" = "Other soil",
+                              "Factor 4" = "Fossil fuel"))+
+  guides(fill= guide_legend(title= "Source"))+ #Change legend from Factor to Source
+  theme_test()+
+  theme(axis.text = element_text(size = 11),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 18, hjust = 0.5),
+        legend.title = element_text(hjust = 0.5), #adjust legend title (center)
+        strip.text.y = element_blank(),) #remove the grey box labels for each factor profile
+
+#Save plot using ggsave
+ggsave(here("figures", "figure2_b&w.png"), plot = last_plot(), width = 8, height = 6, units = "in", dpi = 1000)
+```
+
+If the graph is needed in colors, use the code below:
+
+```{r}
+# Define color palette for factors
+factor_colors <- c("Factor 1" = "cyan4",
+                   "Factor 2" = "indianred2",
+                   "Factor 3" = "darksalmon",
+                   "Factor 4" = "lightskyblue")
+
+#Create the plot
+ggplot(spec_longer, aes(x= species, y= Percent, fill= Factor))+
+  geom_col()+
+  facet_grid(Factor ~., scales = "fixed")+ #Set the grid and make the scale the same for all Factors
+  scale_y_continuous(position = "left")+ #Set the y-scale axis on the left
+  labs(x= "Species", y= "Proportion of Species (%)")+ #Change the labels
+  scale_x_discrete(labels= c("Mg", "Al", "Si", "S", "K", "Ca", "Ti", "Mn", "Fe", "Cl", "Na", "BC", "PM2.5"))+ #Manually label the x-axis
+  #ggtitle("Species Profiles by a Four-factor model")+
+  scale_fill_manual(values = factor_colors, #Set the color palette created before
+                    labels= c("Factor 1" = "Biomass", #Rename factors to their corresponding source names
+                              "Factor 2" = "Crustal",
+                              "Factor 3" = "Other soil",
+                              "Factor 4" = "Fossil fuel"))+
+  guides(fill= guide_legend(title= "Source"))+ #Change legend from Factor to Source
+  theme_test()+
+  theme(axis.text = element_text(size = 11),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(size = 18, hjust = 0.5),
+        legend.title = element_text(hjust = 0.5), #adjust legend title (center)
+        strip.text.y = element_blank(),) #remove the grey box labels for each factor profile
+
+#Save plot using ggsave
+ggsave(here("figures", "figure2.png"), plot = last_plot(), width = 8, height = 6, units = "in", dpi = 1000)
+```
+
+
+### PM2.5 contributions
+
+Now, to check the proportion of PM2.5 that is contributed by each study arm (including baseline), and divided by source. For this part, I will work with the `concentration` data frame. First I will do some edits, so I keep only the observed PM2.5 concentrations and other variables. Then I will estimate the concentrations apportioned to each source (factor), by using the values from the `HAPIN4_base` output from the EPA PMF 5.0 software. Finally, the 95% CIs from the concentrations will be reported.
+
+```{r}
+#Select only the ID's, observed PM2.5 concentrations, fueltype, arm and group variables
+pm25_contributions <- concentration %>% 
+  select(c(filter_id, arm, fueltype, group, PM25))
+
+#Rename 'PM25' to 'obs_pm'
+pm25_contributions <- pm25_contributions %>% rename(obs_pm = "PM25")
+
+#Calculate the mass of PM2.5 for each source (factor)
+pm25_contributions <- pm25_contributions %>% 
+  mutate(source_1 = obs_pm * 0.6964239, #69.64% of PM2.5 contributes to factor 1
+         source_2 = obs_pm * 0.04120215, #4.12% of PM2.5 contributes to factor 2
+         source_3 = obs_pm * 0.04211482, #4.21% of PM2.5 contributes to factor 3
+         source_4 = obs_pm * 0.2202591) #22.02% of PM2.5 contributes to factor 4
+
+#ESTIMATE CONTRIBUTIONS FOR CONTROL, INTERVENTION AND BASELINE ONLY
+# Calculate the sum of the variables from 'source_1' to 'source_4'
+contributions_group <- pm25_contributions %>%
+  mutate(sum_pm = rowSums(select(., source_1:source_4), na.rm = TRUE))
+
+# Function to calculate mean, standard error, and 95% confidence interval
+calculate_stats <- function(data) {
+  mean_val <- mean(data, na.rm = TRUE)
+  se_val <- sd(data, na.rm = TRUE) / sqrt(length(data))
+  ci_lower <- mean_val - qt(0.975, df = length(data) - 1) * se_val
+  ci_upper <- mean_val + qt(0.975, df = length(data) - 1) * se_val
+  return(data.frame(mean = mean_val, se = se_val, ci_lower = ci_lower, ci_upper = ci_upper))
+}
+
+# Group by 'group' and calculate the required statistics, including 95% CIs
+summary_group <- contributions_group %>%
+  group_by(group) %>%
+  summarise(across(sum_pm, list(mean = ~mean(.), se = ~sd(.) / sqrt(n()), 
+                                ci_lower = ~mean(.) - qt(0.975, df = n() - 1) * (sd(.) / sqrt(n())), 
+                                ci_upper = ~mean(.) + qt(0.975, df = n() - 1) * (sd(.) / sqrt(n())))))
+
+# Display the results
+print(summary_group)
+
+
+#FOR SOURCE 1, 2, 3 4 BY STUDY GROUP
+# Compute mean, standard error, and 95% confidence intervals of the PM2.5 concentrations grouped by source and by study group
+#summary_sources <- pm25_contributions %>%
+  #group_by(group) %>% #Group by study group
+  #summarise(
+    #mean_source_1 = mean(source_1, na.rm = TRUE), #Estimate the mean for source 1
+    #se_source_1 = sd(source_1, na.rm = TRUE) / sqrt(n()), #Estimate the SD for source 1
+    #ci_lower_source_1 = mean_source_1 - qt(0.975, df = n() - 1) * se_source_1, #Estimate the lower limit of source 1
+    #ci_upper_source_1 = mean_source_1 + qt(0.975, df = n() - 1) * se_source_1, #Estimate the upper limit of source 2
+    
+    #mean_source_2 = mean(source_2, na.rm = TRUE),
+    #se_source_2 = sd(source_2, na.rm = TRUE) / sqrt(n()),
+    #ci_lower_source_2 = mean_source_2 - qt(0.975, df = n() - 1) * se_source_2,
+    #ci_upper_source_2 = mean_source_2 + qt(0.975, df = n() - 1) * se_source_2,
+    
+    #mean_source_3 = mean(source_3, na.rm = TRUE),
+    #se_source_3 = sd(source_3, na.rm = TRUE) / sqrt(n()),
+    #ci_lower_source_3 = mean_source_3 - qt(0.975, df = n() - 1) * se_source_3,
+    #ci_upper_source_3 = mean_source_3 + qt(0.975, df = n() - 1) * se_source_3,
+    
+    #mean_source_4 = mean(source_4, na.rm = TRUE),
+    #se_source_4 = sd(source_4, na.rm = TRUE) / sqrt(n()),
+    #ci_lower_source_4 = mean_source_4 - qt(0.975, df = n() - 1) * se_source_4,
+    #ci_upper_source_4 = mean_source_4 + qt(0.975, df = n() - 1) * se_source_4)
+
+# Print the results
+#print(summary_sources)
+
+#FOR SOURCE 1, 2, 3 4 ONLY
+# Transform the data set (PART 2)
+#summary_transformed <- pm25_contributions %>%
+  #pivot_longer(cols = starts_with("source_"), names_to = "Source", values_to = "Value") %>%
+  #pivot_wider(names_from = group, values_from = Value)
+
+#Compute mean, standard error, and 95% confidence intervals of the PM2.5 concentrations grouped by study group
+#summary_group <- summary_transformed %>%
+  #group_by(Source) %>% #Group by Source
+  #summarise(
+    #mean_baseline = mean(Baseline, na.rm = TRUE), #Estimate the mean for baseline
+    #se_baseline = sd(Baseline, na.rm = TRUE) / sqrt(n()), #Estimate the SD for baseline
+    #ci_lower_baseline = mean_baseline - qt(0.975, df = n() - 1) * se_baseline, #Estimate the lower limit of baseline
+    #ci_upper_baseline = mean_baseline + qt(0.975, df = n() - 1) * se_baseline, #Estimate the upper limit of baseline
+    
+    #mean_control = mean(Control, na.rm = TRUE),
+    #se_control = sd(Control, na.rm = TRUE) / sqrt(n()),
+    #ci_lower_control = mean_control - qt(0.975, df = n() - 1) * se_control,
+    #ci_upper_control = mean_control + qt(0.975, df = n() - 1) * se_control,
+    
+    #mean_intervention = mean(Intervention, na.rm = TRUE),
+    #se_intervention = sd(Intervention, na.rm = TRUE) / sqrt(n()),
+    #ci_lower_intervention = mean_intervention - qt(0.975, df = n() - 1) * se_intervention,
+    #ci_upper_intervention = mean_intervention + qt(0.975, df = n() - 1) * se_intervention)
+
+# Print the results
+#print(summary_group)
+```
+
+#### PM2.5 contributions graphs
+
+Do bar charts that show the contribution of each source by each group (BL, Control, Intervention). First, create a data frame with the mean contributions of PM2.5 by source and group.
+
+```{r}
+
+# Calculate the mean of the factor variables by 'arm'
+mean_contributions <- pm25_contributions %>%
+  group_by(group) %>%
+  summarise(mean_source1 = mean(source_1, na.rm = TRUE),
+            mean_source2 = mean(source_2, na.rm = TRUE),
+            mean_source3 = mean(source_3, na.rm = TRUE),
+            mean_source4 = mean(source_4, na.rm = TRUE))
+
+#Reshape contributions data frame
+contributions_summary <- mean_contributions %>% 
+  pivot_longer(cols = c(mean_source1, mean_source2, mean_source3, mean_source4),
+               names_to = "source",
+               values_to = "concentration")
+
+#Estimate total percentage contributions by group and factor
+contributions_summary <- contributions_summary %>% 
+  mutate(percentage = concentration/sum(concentration) * 100) %>% 
+  mutate(source = case_when(
+    source == "mean_source1" ~ "source1",
+    source == "mean_source2" ~ "source2",
+    source == "mean_source3" ~ "source3",
+    source == "mean_source4" ~ "source4",
+    TRUE ~ source))
+
+#Calculate the standard errors by group
+#contributions_summary <- contributions_summary %>%
+  #group_by(group) %>%
+  #mutate(error = sd(concentration) / sqrt(n()))
+
+#Add confidence intervals to data frame
+contributions_summary$ci_lower <- c(rep(129.74, 4), rep(114.71, 4), rep(27.18, 4))
+contributions_summary$ci_upper <- c(rep(180.15, 4), rep(139.67, 4), rep(32.66, 4))
+
+#Print dataframe
+print(contributions_summary)
+```
+
+Create a plot in black and white.
+
+```{r}
+#Define the patter for each factor
+factor_patterns <- c("source1" = "circle",
+                       "source2" = "stripe",
+                       "source3" = "none",
+                     "source4" = "crosshatch")
+
+#Create plot (with patterns instead of grayscale)
+ggplot(contributions_summary, aes(x = group, y = concentration, pattern = source)) +
+  geom_col_pattern(fill = "white", color = "black", pattern_fill = "black", #keep bars white and pattern color
+                   pattern_colour = "black", pattern_density = 0.2, pattern_spacing = 0.02) + 
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.2, color = "black") +  # Add error bars
+  scale_y_continuous(breaks = seq(0, 220, by = 10)) + #Scale of the y-axis
+  labs(y = expression(Mass~concentration~(ug/m^3)), x = "Study group") + #Relabel x and y axis
+  scale_pattern_manual(values = factor_patterns,
+                    labels= c("source1" = "Biomass",
+                              "source2" = "Crustal",
+                              "source3" = "Other soil",
+                              "source4" = "Fossil fuel"))+
+  theme_test()+
+  theme(axis.text = element_text(size = 9), #Change the size of the x and y scale and labels
+        axis.title = element_text(size = 14),
+        axis.text.x = element_text(size = 12),
+        legend.title = element_text(hjust = 0.5),
+        legend.text = element_text(size = 10))
+
+#Save plot using ggsave
+ggsave(here("figures", "figure5_b&w.png"), plot = last_plot(), width = 20, height = 14, units = "cm")
+```
+
+Same plot from above, but in colors:
+
+```{r}
+#Define factor colors
+factor_colors2 <- c("source1" = "cyan4",
+                   "source2" = "indianred2",
+                   "source3" = "darksalmon",
+                   "source4" = "lightskyblue")
+
+#Create plot (on a grayscale)
+ggplot(contributions_summary, aes(x = group, y = concentration, fill = source)) +
+  geom_col(color= NA) + #Color the borders of the bars
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), 
+                width = 0.2, color = "black") +  # Add error bars
+  scale_y_continuous(breaks = seq(0, 220, by = 10)) + #Scale of the y-axis
+  labs(y = expression(Mass~concentration~(ug/m^3)), x = "Study group") + #Relabel x and y axis
+  scale_fill_manual(values = factor_colors2,
+                    labels= c("source1" = "Biomass",
+                              "source2" = "Crustal",
+                              "source3" = "Other soil",
+                              "source4" = "Fossil fuel"))+ #Input the color palette manually
+  theme_test()+
+  theme(axis.text = element_text(size = 9), #Change the size of the x and y scale and labels
+        axis.title = element_text(size = 14),
+        axis.text.x = element_text(size = 12),
+        legend.title = element_text(hjust = 0.5),
+        legend.text = element_text(size = 10))
+
+#Save plot using ggsave
+ggsave(here("figures", "figure5.png"), plot = last_plot(), width = 20, height = 14, units = "cm")
+```
+
+
+Do something similar as a pie chart, but improved, to visualize the contribution of PM2.5 concentrations by study arm (including baseline) First building the dataset for the treemap by sources.
+
+```{r}
+#Build data set
+group <- c("Biomass", "Crustal", "Other soil", "Fossil fuels") #Sources as groups
+value <- c(54.25, 3.21, 3.28, 17.16) #Input concentrations as values, this comes from the HAPIN4_base xlsx file. List them in order
+treedata <- data.frame(group, value) #Create the treemap data frame
+```
+
+Now plotting the treemap of study arm by sources. The graph from below will be manually saved, so then it will be edited in paint to create the graphical abstract.
+
+```{r}
+#Define palette of colors
+treemap_colors <- c("#00FF99", "#FF6666", "#66CCFF", "#FFCC99")
+
+#Create the plot (Note: The concentrations and % values will be entered manually on paint)
+treemap(treedata, #Select the dataset
+        index = "group", #Select the group and subgroup values to plot the quadrants
+        vSize = "value", #Select the values that give the sizes for each group and subgroup
+        type = "index", #The colors are determined by the index variables
+        title = expression(PM[2.5]~mass~contribution~to~each~source), #Add title
+        fontsize.labels = 0, #size of the group labels, 0, so it manually is edited later
+        fontcolor.labels = "black",
+        fontsize.title = 18, #Size for the title
+        fontsize.legend = 10, #Not sure if this is necessary
+        bg.labels = "transparent", #Only show the labels with no highlights around the labels
+        palette = treemap_colors, #Select the color palette manually
+        align.labels = list(c("center", "center"), c("center", "bottom"))) #Placement for the labels, first is group and second is subgroups
+
+```
+
+### Pie chart of PM2.5 contributions by source
+
+The first pie chart is in black and white:
+
+```{r}
+#Load the dataset
+pm25 <- read_csv(here("data", "raw-data", "pm25_proportions.csv"))
+
+#Define the color palette (Black and white)
+factor_colors3 <- c("Biomass" = "grey75",
+                   "Crustal" = "grey50",
+                   "Other Soil" = "grey25",
+                   "Fossil Fuel" = "grey0")
+
+#Order for sources
+pm25$Source <- factor(pm25$Source,
+                      levels = c("Biomass", "Crustal", "Other Soil", "Fossil Fuel"))
+
+#Compute the position of the labels
+pm25 <- pm25 %>% 
+  arrange(desc(Source)) %>%
+  mutate(prop = round(Concentration / sum(pm25$Concentration) *100, 2)) %>%
+  mutate(ypos = cumsum(prop)- 0.6*prop )
+
+# Graph a piechart
+ggplot(pm25, aes(x="", y= prop, fill= Source)) +
+  geom_bar(stat="identity", width=1, color= "white") +
+  coord_polar("y", start=0)+
+  scale_fill_manual(values = factor_colors3)+
+  theme_void()+
+  theme(legend.position = "left", 
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14, hjust = 0.5),
+        plot.title = element_text(size = 16, hjust = 0.5))
+
+#Then, manually enter the concentrations and proportions in paint
+
+#Save plot using ggsave
+ggsave(here("figures", "figure3_b&w.png"), plot = last_plot(), width = 20, height = 14, units = "cm", bg = "white")
+
+```
+
+This code below for the pie chart in colors:
+
+```{r}
+#Define the color palette
+factor_colors3 <- c("Biomass" = "cyan4",
+                   "Crustal" = "indianred2",
+                   "Other Soil" = "darksalmon",
+                   "Fossil Fuel" = "lightskyblue")
+
+#Order for sources
+pm25$Source <- factor(pm25$Source,
+                      levels = c("Biomass", "Crustal", "Other Soil", "Fossil Fuel"))
+
+#Compute the position of the labels
+pm25 <- pm25 %>% 
+  arrange(desc(Source)) %>%
+  mutate(prop = round(Concentration / sum(pm25$Concentration) *100, 2)) %>%
+  mutate(ypos = cumsum(prop)- 0.6*prop )
+
+# Graph a piechart
+ggplot(pm25, aes(x="", y= prop, fill= Source)) +
+  geom_bar(stat="identity", width=1, color= "white") +
+  coord_polar("y", start=0)+
+  scale_fill_manual(values = factor_colors3)+
+  theme_void()+
+  theme(legend.position = "left", 
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14, hjust = 0.5),
+        plot.title = element_text(size = 16, hjust = 0.5))
+
+#Then, manually enter the concentrations and proportions in paint
+
+#Save plot using ggsave
+ggsave(here("figures", "figure3.png"), plot = last_plot(), width = 20, height = 14, units = "cm", bg = "white")
+```
+
+
+### Observed-Predicted PM2.5
+
+This part is computed using the source contributions of PM2.5 for each factor (source). In summary, a .csv file that contains the filter IDs and the PM2.5 contributions from each factor was created by copying the values from row 7590 from the `HAPIN4_sourcecontributions.xls` output file from the EPA PMF 5.0 software. Then, the total PM2.5 was estimated as the sum of PM2.5 contributions by each factor, and the observed PM2.5 from the `concentrations` data file were also placed into the file.
+
+```{r}
+#Load data
+predpm_contributions <- read_csv(here("data", "processed-data", "contributions.csv"))
+
+#Sum the contributions from each factor and add the observed PM2.5 concentrations
+predpm_contributions <- predpm_contributions %>% 
+  mutate(predpm = rowSums(select(., factor_1:factor_4))) %>% #Sum contributions
+  mutate(obspm = concentration$PM25) #Add observed PM2.5 values
+```
+
+Now, do a graph that plots the observed vs predicted PM2.5 mass concentrations
+
+```{r}
+#Do a graph of obs vs pred values using ggplot()
+predpm_contributions %>% 
+  ggplot(aes(x= obspm, y= predpm))+ #Selecting the observed and predicted PM2.5 concentrations
+  geom_point(shape= 21, color= "black", size= 2)+ #Select point as geometry and size and color of the point
+  geom_smooth(method = lm, colour= "black", se= T)+ #Add the lm line with SE
+  xlab(expression(Observed~PM[2.5]~concentration~(ug/m^3)))+ #X label
+  ylab(expression(Predicted~PM[2.5]~concentration~(ug/m^3)))+ #y label
+  scale_x_continuous(limits = c(0, 800))+ #Manually set the x-limits
+  scale_y_continuous(limits = c(0, 800))+ #Manually set the y-limits
+  #labs(title = expression(Observed~vs~Predicted~PM[2.5]~mass~concentrations))+ #Title of the plot
+  theme_test()+
+  theme(aspect.ratio = 1)+ #Aspect ratio of graph "square"
+  geom_abline(intercept = 0, slope = 1, linewidth= 0.5, linetype = "dashed")+ #set an abline dashed
+  stat_cor(aes(label = paste(after_stat(rr.label), sep = "~`, `~")), label.x = 3) + # Add R2 value
+  #stat_cor(method = "pearson", #add the correlation
+           #alternative = "two.sided", #two-sided test
+           #cor.coef.name = expression(R^2), #for Spearman symbol
+           #label.x.npc = "left", #x position
+           #label.y.npc = "top", #y position
+           #p.accuracy = 0.001, #accuracy of the p-value
+           #size= 4)+ #size of text
+  annotate("text", x= 230, y= 700, label= paste("y= (0.62 ± 0.02)x + (20.78 ± 2.12)"), size= 4)
+
+#Save plot
+ggsave(here("figures", "figure5.png"), plot = last_plot(), width = 20, height = 14, units = "cm")
+```
+
+And now do a time-series like plot for the observed vs predicted PM2.5 concentrations
+
+```{r}
+#Reshape data frame with pivot_longer()
+pm_long <- predpm_contributions %>%
+  pivot_longer(cols = c(predpm, obspm), names_to = "type", values_to = "value")
+
+#Set color palette for the plot
+pm_palette <- c("#E66100", "#5D3A9B")
+pm_labels <- c("obspm"= "Observed", "predpm"= "Predicted")
+
+#Create plot
+ggplot(pm_long, aes(x = filter_id, y = value, color = type, group = type)) +
+  geom_point() +
+  geom_line() +
+  labs(title = expression(Observed~vs~Predicted~PM[2.5]~mass~concentrations),
+       color = "Type") +
+  xlab(expression(Data~Point))+ #X label
+  ylab(expression(PM[2.5]~mass~concentration~(ug/m^3)))+ #y label
+  scale_color_manual(values= pm_palette, labels= pm_labels)+
+  theme_minimal()+
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+ggsave(here("figures", "obs-pred.png"), plot = last_plot(), width = 20, height = 14, units = "cm")
+```
+

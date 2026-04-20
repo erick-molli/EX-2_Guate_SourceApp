@@ -1,0 +1,578 @@
+---
+title: "Data cleaning"
+author: Erick E. Mollinedo
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+format: html
+editor: visual
+---
+
+Packages needed for data cleaning and data exploration
+
+```{r}
+library(here)
+library(readxl)
+library(tidyverse)
+library(naniar)
+library(lubridate)
+```
+
+## HAPIN Guatemala data cleaning
+
+First I will load the HAPIN Guatemala dataset that has some of the variables of interest and assign it to the `hapin` dataframe, and I will also load a file that has all the filter IDs that I need to find in the `hapin` dataframe, I'll assign it to the `xrflist` dataframe.
+
+```{r}
+hapin <- read_csv(here("data", "raw-data", "HAPIN_EX17_Guatemala_20230728.csv"))
+xrflist <- read_csv(here("data", "raw-data", "sa_filters_emollinedo.csv"))
+```
+
+Now I will only select the variables I am interested to work with.
+
+```{r}
+hapin <- hapin %>% select(hhid, h41_date, trt_blinded, timepoint, h41_m_ecm_fid, h41_b_ecm_fid, h41b_filter1, h41b_filter2, ECM_grav_neph_conc_M, ECM_bc_conc_M)
+```
+
+And now I will select only the observations from `hapin` that correspond to the filter IDs from the `xrflist` dataframe. These filter IDs could be located in either of the following variables: `h41_m_ecm_fid`, `h41_b_ecm_fid`, `h41b_filter1`, `h41b_filter2`, so I searched in these columns. But first I made sure all the filter IDs were in the same format as the IDs from the `xrflist`.
+
+```{r}
+#Make sure all filter IDs are upper case, using the `mutate()` function with `toupper()`
+hapin <- hapin %>% 
+  mutate(h41_m_ecm_fid = toupper(h41_m_ecm_fid),
+         h41b_filter1 = toupper(h41b_filter1),
+         h41_b_ecm_fid = toupper(h41_b_ecm_fid),
+         h41b_filter2 = toupper(h41b_filter2))
+
+#Select all filters that match with the list of filters from XRF, using the `filter()` function.
+hapin <- hapin %>%
+  filter(h41_m_ecm_fid %in% xrflist$filter_id |
+           h41b_filter1 %in% xrflist$filter_id |
+           h41_b_ecm_fid %in% xrflist$filter_id |
+           h41b_filter2 %in% xrflist$filter_id)
+```
+
+Here I will create a new variable called `fueltype`, this variable will be coded as "LPG" or "Biomass" depending on the type of visit and the treatment or intervention `trt_blinded`.
+
+```{r}
+#Concatenate `trt_blinded` and `timepoint` into a new temporary variable
+hapin$concatenated <- paste(hapin$trt_blinded, hapin$timepoint) 
+
+#Create a new variable `fueltype` that categorizes all the observations by type of fuel ('R' means the visit belongs to the 'Control' treatment and 'Q' for the 'Intervention' treatment)
+hapin <- mutate(hapin, fueltype = case_when(
+  endsWith(concatenated, "BL") ~ "Biomass", #BL corresponds to the baseline, where all the participants had a biomass type fuel stove
+  endsWith(concatenated, "R P1") ~ "Biomass",
+  endsWith(concatenated, "R P2") ~ "Biomass",
+  endsWith(concatenated, "Q P1") ~ "LPG",
+  endsWith(concatenated, "Q P2") ~ "LPG",
+  endsWith(concatenated, "R BLP1") ~ "Biomass",
+  endsWith(concatenated, "R P1P2") ~ "Biomass",
+  endsWith(concatenated, "R P2B1") ~ "Biomass",
+  endsWith(concatenated, "Q BLP1") ~ "LPG",
+  endsWith(concatenated, "Q P1P2") ~ "LPG",
+  endsWith(concatenated, "Q P2B1") ~ "LPG"))
+```
+
+Now I will create a variable called `group`, which will be coded as 'Baseline', 'Control' or 'Intervention'.
+
+```{r}
+hapin <- mutate(hapin, group = case_when(
+  endsWith(concatenated, "BL") ~ "Baseline",
+  endsWith(concatenated, "R P1") ~ "Control",
+  endsWith(concatenated, "R P2") ~ "Control",
+  endsWith(concatenated, "Q P1") ~ "Intervention",
+  endsWith(concatenated, "Q P2") ~ "Intervention",
+  endsWith(concatenated, "R BLP1") ~ "Control",
+  endsWith(concatenated, "R P1P2") ~ "Control",
+  endsWith(concatenated, "R P2B1") ~ "Control",
+  endsWith(concatenated, "Q BLP1") ~ "Intervention",
+  endsWith(concatenated, "Q P1P2") ~ "Intervention",
+  endsWith(concatenated, "Q P2B1") ~ "Intervention"))
+```
+
+And now I will rename some of the variables and delete unnecessary ones. I will also recode the values from the newly named `arm` variable, and set `date` in date format.
+
+```{r}
+hapin <- hapin %>% rename(filter_id = "h41_m_ecm_fid", dup1_filterid = "h41b_filter1", dup2_filterid = "h41b_filter2",
+                         blank_filterid = "h41_b_ecm_fid", date = "h41_date",  arm = "trt_blinded", pm25 = "ECM_grav_neph_conc_M",
+                         bc = "ECM_bc_conc_M") %>% 
+  select(-concatenated) %>% 
+  mutate(arm = case_when(arm == 'R' ~ 'Control', arm == 'Q' ~ 'Intervention', TRUE ~ arm))
+
+#Set date in date format
+hapin <- hapin %>% mutate(date = mdy(date))
+```
+
+Then, I will create four dataframes, one for the personal filters, other two for the duplicates and another one for the blank filters. I will also remove the unnecessary columns from these dataframes.
+
+```{r}
+#Creating the dataframe for personal sample filters, and deleting the other columns with unnecessary filter IDs
+hapin_personal <- hapin %>% filter(filter_id %in% xrflist$filter_id) %>% 
+  select(-c(blank_filterid, dup1_filterid, dup2_filterid))
+
+#Creating the dataframe for duplicates in column 4, and deleting the other columns with unnecessary filter IDs, and renaming `dup1_filterid` to `filter_id`.
+hapin_dup1 <- hapin %>% filter(dup1_filterid %in% xrflist$filter_id) %>% 
+  select(-c(blank_filterid, filter_id, dup2_filterid)) %>% 
+  rename(filter_id = "dup1_filterid")
+
+#Creating the dataframe for duplicates in column 5, and deleting the other columns with unnecessary filter IDs, and renaming `dup2_filterid` to `filter_id`.
+hapin_dup2 <- hapin %>% filter(dup2_filterid %in% xrflist$filter_id) %>% 
+  select(-c(blank_filterid, filter_id, dup1_filterid)) %>% 
+  rename(filter_id = "dup2_filterid")
+
+#Creating the dataframe for blank filters, and deleting the other columns with unnecessary filter IDs, and renaming `blank_filterid` to `filter_id`.
+hapin_blanks <- hapin %>% filter(blank_filterid %in% xrflist$filter_id) %>% 
+  select(-c(filter_id, dup1_filterid, dup2_filterid)) %>% 
+  rename(filter_id = "blank_filterid")
+```
+
+And now I will combine the personal and duplicates dataframes into a single one named `hapin_filters`.
+
+```{r}
+#Combining the `personal` and `dup` dataframes into a single one, using `bind_rows()`
+hapin_filters <- bind_rows(hapin_personal, hapin_dup1, hapin_dup2)
+```
+
+Both the personal exposure sample and the blank dataframes are ready to be used for further analysis, so I saved them in .CSV format.
+
+```{r}
+write_csv(hapin_filters, file = here("data", "processed-data", "hapin_samples.csv"))
+write_csv(hapin_blanks, file = here("data", "processed-data", "hapin_blanks.csv"))
+```
+
+## Chemical species Concentrations data cleaning
+
+The following sections will be long, but necessary to demonstrate how to clean all the data and make all the adjustments before getting the final data for analysis. First I will load the file with the chemical species concentrations, assigned to the `concentration` dataframe. I will also load the limit of detection values from all chemical species under the `lod` dataframe.
+
+```{r}
+#Loading the chemical species concentration data
+concentration <- read_excel(here("data", "raw-data", "conc_unc_hapingt_emollinedo.xlsx"), sheet = "Concentration")
+
+#Loading the chemical species limit of detection values
+lod <- read_excel(here("data", "raw-data", "conc_unc_hapingt_emollinedo.xlsx"), sheet = "DL")
+
+#having a glimpse of this dataframe
+glimpse(concentration)
+```
+
+Some observations contain brackets, which represent values below the detection limit and they have to be corrected in future steps. So first, here I will delete the brackets, then I will convert these variables to numeric type and round them to 4 decimal digits.
+
+```{r}
+#Remove brackets, convert to numeric, and round to 4 decimal places
+concentration <- concentration %>%
+  mutate(across(3:26, ~ round(as.numeric(str_remove_all(., "\\[|\\]")), 4))) %>% 
+  rename(filter_id = "Filter")
+```
+
+Now, I will remove the filters that correspond to field blanks, since those will be used to adjust the sample filters. I will create a new data frame `blanks`, that contains those observations.
+
+```{r}
+#Create dataframe with the concentrations for the blank filters for each element
+blanks <- concentration %>% filter(filter_id %in% hapin_blanks$filter_id) %>% 
+  select(-c(filter_id, Type))
+
+#Remove blank filters from the `concentration` dataframe
+concentration <- concentration %>%
+  anti_join(hapin_blanks, by = "filter_id")
+
+#Calculate the median for each element, using the blank filter values
+median_blanks <- blanks %>% select(Mg: Na) %>%
+  map_dbl(median) %>% round(4)
+
+median_blanks
+```
+
+Now, I will estimate which chemical species are representative, by filtering all the species with less than 50% of their values are below the detection limit.
+
+```{r}
+#Round the limit of detection values to 4 decimal places
+lod <- lod %>% mutate(`Concentration (ug/cm2)` = round(`Concentration (ug/cm2)`, 4))
+print(lod)
+
+#Estimate the percentage of values below detection limit for each element
+bdl <- concentration %>%
+  summarise(
+    percent_bdl_mg = sum(Mg < 0.0051) / n() * 100,
+    percent_bdl_al = sum(Al < 0.0059) / n() * 100,
+    percent_bdl_si = sum(Si < 0.0068) / n() * 100,
+    percent_bdl_s = sum(S < 0.0026) / n() * 100,
+    percent_bdl_k = sum(K < 0.0040) / n() * 100,
+    percent_bdl_ca = sum(Ca < 0.0040) / n() * 100,
+    percent_bdl_ti = sum(Ti < 0.0086) / n() * 100,
+    percent_bdl_cr = sum(Cr < 0.0055) / n() * 100,
+    percent_bdl_mn = sum(Mn < 0.0030) / n() * 100,
+    percent_bdl_fe = sum(Fe < 0.0043) / n() * 100,
+    percent_bdl_ni = sum(Ni < 0.0043) / n() * 100,
+    percent_bdl_cu = sum(Cu < 0.0080) / n() * 100,
+    percent_bdl_zn = sum(Zn < 0.0024) / n() * 100,
+    percent_bdl_ga = sum(Ga < 0.0049) / n() * 100,
+    percent_bdl_as = sum(As < 0.0062) / n() * 100,
+    percent_bdl_se = sum(Se < 0.0181) / n() * 100,
+    percent_bdl_cd = sum(Cd < 0.0932) / n() * 100,
+    percent_bdl_in = sum(In < 0.1089) / n() * 100,
+    percent_bdl_sn = sum(Sn < 0.1844) / n() * 100,
+    percent_bdl_te = sum(Te < 0.2166) / n() * 100,
+    percent_bdl_i = sum(I < 0.3149) / n() * 100,
+    percent_bdl_pb = sum(Pb < 0.0324) / n() * 100,
+    percent_bdl_cl = sum(Cl < 0.003) / n() * 100,
+    percent_bdl_na = sum(Na < 0.04) / n() * 100)
+
+print(bdl)
+
+#By counts
+bdl2 <- concentration %>%
+  summarise(
+    count_bdl_mg = sum(Mg < 0.0051),
+    count_bdl_al = sum(Al < 0.0059),
+    count_bdl_si = sum(Si < 0.0068),
+    count_bdl_s = sum(S < 0.0026),
+    count_bdl_k = sum(K < 0.0040),
+    count_bdl_ca = sum(Ca < 0.0040),
+    count_bdl_ti = sum(Ti < 0.0086),
+    count_bdl_cr = sum(Cr < 0.0055),
+    count_bdl_mn = sum(Mn < 0.0030),
+    count_bdl_fe = sum(Fe < 0.0043),
+    count_bdl_ni = sum(Ni < 0.0043),
+    count_bdl_cu = sum(Cu < 0.0080),
+    count_bdl_zn = sum(Zn < 0.0024),
+    count_bdl_ga = sum(Ga < 0.0049),
+    count_bdl_as = sum(As < 0.0062),
+    count_bdl_se = sum(Se < 0.0181),
+    count_bdl_cd = sum(Cd < 0.0932),
+    count_bdl_in = sum(In < 0.1089),
+    count_bdl_sn = sum(Sn < 0.1844),
+    count_bdl_te = sum(Te < 0.2166),
+    count_bdl_i = sum(I < 0.3149),
+    count_bdl_pb = sum(Pb < 0.0324),
+    count_bdl_cl = sum(Cl < 0.003),
+    count_bdl_na = sum(Na < 0.04))
+
+print(bdl2)
+```
+
+Only 12 elements have less than 50% of their observations below the detection limit. But first, I will process the concentrations for all chemical species (including the ones with more than 50% of their observations BDL), so they are included into the appendix table. First, blank adjusting all the values, by substracting the median value for each element, obtained from the blank filters. Also, replace all values below the detection limit with (LOD/sqrt(2)).
+
+```{r}
+#Substract the median blank value for the elements that need blank adjustment
+concentration <- concentration %>%
+  mutate(Mg = Mg - 0.0112, S = S - 0.0044, K = K - 0.0014, Ca = Ca - 0.0048, Fe = Fe - 0.0038, Cu = Cu - 0.0043, Zn = Zn - 0.0045, Sn = Sn - 0.0050, Te = Te - 0.020, I = I - 0.10, Na = Na - 0.0135)
+
+#Replace all values below the detection limit with DL/sqrt(2)
+concentration <- concentration %>% 
+    mutate(Mg = round(if_else(Mg < 0.0051, 0.0051 / sqrt(2), Mg), 4), Al = round(if_else(Al < 0.0059, 0.0059 / sqrt(2), Al), 4),
+           Si = round(if_else(Si < 0.0068, 0.0068 / sqrt(2), Si), 4), S = round(if_else(S < 0.0026, 0.0026 / sqrt(2), S), 4),
+           K = round(if_else(K < 0.0016, 0.0016 / sqrt(2), K), 4), Ca = round(if_else(Ca < 0.0040, 0.0040 / sqrt(2), Ca), 4),
+           Ti = round(if_else(Ti < 0.0086, 0.0086 / sqrt(2), Ti), 4), Cr = round(if_else(Cr < 0.0055, 0.0055 / sqrt(2), Cr), 4),
+           Mn = round(if_else(Mn < 0.0030, 0.0030 / sqrt(2), Mn), 4), Fe = round(if_else(Fe < 0.0043, 0.0043 / sqrt(2), Fe), 4), 
+          Ni = round(if_else(Ni < 0.0043, 0.0043 / sqrt(2), Ni), 4), Cu = round(if_else(Cu < 0.0080, 0.0080 / sqrt(2), Cu), 4),  
+          Zn = round(if_else(Zn < 0.0024, 0.0024 / sqrt(2), Zn), 4), Ga = round(if_else(Ga < 0.0049, 0.0049 / sqrt(2), Ga), 4),
+          As = round(if_else(As < 0.0062, 0.0062 / sqrt(2), As), 4), Se = round(if_else(Se < 0.0181, 0.0181 / sqrt(2), Se), 4),  
+          Cd = round(if_else(Cd < 0.0932, 0.0932 / sqrt(2), Cd), 4), In = round(if_else(In < 0.1089, 0.1089 / sqrt(2), In), 4),  
+          Sn = round(if_else(Sn < 0.1844, 0.1844 / sqrt(2), Sn), 4), Te = round(if_else(Te < 0.2166, 0.2166 / sqrt(2), Te), 4),  
+          I = round(if_else(I < 0.3149, 0.3149 / sqrt(2), I), 4), Pb = round(if_else(Pb < 0.0324, 0.0324 / sqrt(2), Pb), 4),  
+           Cl = round(if_else(Cl < 0.003, 0.003 / sqrt(2), Cl), 4), Na = round(if_else(Na < 0.04, 0.04 / sqrt(2), Na), 4))
+```
+
+I will save these concentrations in a new dataframe `concentrations_ugcm2` that will be used for uncertainty estimations in future steps. First, removing all unnecessary species (Species with 50% \> B LoD), then arranging the observations based on the LoD.
+
+```{r}
+#Select only the filter ID, type and the 12 elements that have more than 50% of their data not below the detection limit
+concentrations_ugcm2 <- concentration %>% select(c(filter_id, Mg, Al, Si, S, K, Ca, Ti, Mn, Fe, Zn, Cl, Na)) %>% 
+  arrange(filter_id) #Also I decided to arrange them ascending based on the filter_id
+```
+
+And then, converting the concentrations from micrograms per square centimeter to micrograms per cubic meter using the equation: ug/m3 = (Concentration (ug/cm^2^) x Filter area (cm^2^))/Sample volume (m3). Where, the filter area is 0.7853 cm^2^ and the sample volume is 0.43 m^3^. And then saving this data frame to `concentration_full`, since this will be used to compute the summary statistics of all original elemental species.
+
+```{r}
+#Converting the concentrations from (ug/cm2) to (ug/m3)
+concentration <- concentration %>%
+  mutate(across(Mg:Na, ~ round(.x * 0.7853 / 0.43, 4))) %>% 
+  arrange(filter_id) #Also I decided to arrange them ascending based on the filter_id
+```
+
+Then, pasting the BC and PM2.5 concentrations from the `hapin_filters` dataframe.
+
+```{r}
+#Now adding the BC concentrations value from the `hapin_filters` df
+hapin_filters <- hapin_filters %>% arrange(filter_id) #First arrange in ascending order by filter_id
+concentration <- bind_cols(concentration, hapin_filters$bc) %>% rename(BC = "...27") %>% select(-Type) #Join the BC concentrations to the `concentrations` df, also renaming the column to "BC" and deleting the 'Type' column
+concentration <- bind_cols(concentration, hapin_filters$pm25) %>% rename(PM25 = "...27")
+```
+
+I will add the fueltype, arm and group variables to this dataframe.
+
+```{r}
+#Add the `arm`, `fueltype` and `group` variables to the `concentration` dataframe
+concentration <- concentration %>%
+  mutate(arm = hapin_filters$arm, fueltype = hapin_filters$fueltype, group = hapin_filters$group)
+```
+
+Then, saving this dataframe to `concentrations_full`, to compute the summary statistics of all the chemical species.
+
+```{r}
+write_csv(concentration, here("data", "processed-data", "concentrations_full.csv"))
+```
+
+Now, I will filter the elements with less than 50% of their observations below detection limit.
+
+```{r}
+#Select only the filter ID, type and the 12 elements that have more than 50% of their data not below the detection limit
+concentration <- concentration %>% select(c(filter_id, arm, fueltype, group, Mg, Al, Si, S, K, Ca, Ti, Mn, Fe, Zn, Cl, Na, BC, PM25))
+```
+
+## Chemical species Uncertainties data processing
+
+Now, it's time to make some adjustments to the uncertainties from all filters across all chemical species. First, loading the uncertainties data to the `uncertainty` data frame.
+
+```{r}
+uncertainty <- read_excel(here("data", "raw-data", "conc_unc_hapingt_emollinedo.xlsx"), sheet = "Uncertainty")
+```
+
+First, I will remove the chemical species with more than 50% of their values below detection limit, also remove the blank filter observations, sort by Filter ID and round the values to numbers with four decimal places.
+
+```{r}
+uncertainty <- uncertainty %>% select(c(Filter, Mg, Al, Si, S, K, Ca, Ti, Mn, Fe, Zn, Cl, Na)) %>% #Select only the necessary variables
+  rename(filter_id = "Filter") %>% #Rename the Filter column
+  mutate_at(vars(Mg:Na), ~ round(., 4)) %>% #Round the uncertainties to 4 decimal places
+  arrange(filter_id) %>% #Arrange observations based on Filter ID
+  anti_join(hapin_blanks, by = "filter_id") #Remove blank filters
+
+#Have a glimpse of the data
+glimpse(uncertainty)
+```
+
+Now, the uncertainties from the concentration values that were LOD adjusted have to be reestimated to (5/6)\*LOD. To do this I created a list that inputs the LOD values for each element, and then using `mutate()`, I make the changes only to the values that follow the specified condition.
+
+```{r}
+#Create a list for the detection limits for each element
+dl <- c(Mg = 0.0051, Al = 0.0059, Si = 0.0068, S = 0.0026, K = 0.0016, 
+        Ca = 0.0040, Ti = 0.0086, Mn = 0.0030, Fe = 0.0043, Zn = 0.0024, 
+        Cl = 0.003, Na = 0.04)
+
+# Recalculate the values in df based on the conditions
+uncertainty <- uncertainty %>%
+  mutate(across(all_of(names(dl)),
+                ~ round(if_else(concentrations_ugcm2[[cur_column()]] < dl[[cur_column()]], (5/6) * dl[[cur_column()]], .), 4),
+                .names = "{.col}"))
+```
+
+Finally, for all the chemical species, the uncertainties have to be reestimated so they correctly reflect the uncertainty for each variable used in the calculations. In this case, input the XRF-estimated concentration, filter area and filter volume uncertainties using the law of propagation of uncertainties. Also, the purpose of this section is to convert the uncertainties from ug/cm2 to ug/m3 to correctly reflect the units of the concentrations.
+
+```{r}
+# Define the variables to be recalculated
+variables <- c('Mg', 'Al', 'Si', 'S', 'K', 'Ca', 'Ti', 'Mn', 'Fe', 'Zn', 'Cl', 'Na')
+
+# Recalculate the values using the given equation
+uncertainty <- uncertainty %>%
+  mutate(across(all_of(variables), ~ round( #Here, selecting all the variables to be re-calculated
+    sqrt((0.7853/0.43)^2 * .^2 + (concentrations_ugcm2[[cur_column()]]/0.43)^2 * 0.05^2 + (-concentrations_ugcm2[[cur_column()]]*0.7853/0.43^2)^2 * (0.05 * 0.43)^2), 4), .names = "{.col}")) #Input the equation
+```
+
+Since the BC concentrations will also be included, I need to estimate the BC uncertainties. These estimations require an additional file that will be assigned to the `atn` dataframe.
+
+```{r}
+#Load file to estimate BC uncertainties
+atn <- read_csv(here("data", "raw-data", "ATN_summary.csv"))
+
+#Explore the structure of the file
+glimpse(atn)
+```
+
+To estimate the BC concentrations, I used an instrument called Sootscan, that calculates transmissometry as attenuation before (pre) and after (post) sampling the filters. These values summarize the pre- and post- ATN values for all the filters, but I have to estimate the total attenuation for all sample filters with the equation: LogN(post-ATN/pre-ATN)\*100.
+
+```{r}
+#Estimate total attenuation by sample
+atn <- atn %>% mutate(ATN = round(log(post_ATN/pre_ATN) *100, 2))
+```
+
+Then, estimate the BC uncertainties using an equation also derived from the law of propagation of uncertainties.
+
+```{r}
+#First I will estimate the BC uncertainties
+uncertainty <- uncertainty %>% 
+  mutate(BC = round((1370 * sqrt((atn$ATN)^2 * 0.000005^2 + 0.000079^2 * 1.16^2)), 4))
+```
+
+Now, I will estimate the uncertainties for the PM2.5 concentrations. First I calculate the raw mass as micrograms and then apply the equation derived from the law of propagation of uncertainties.
+
+```{r}
+#Estimate raw PM2.5 in micrograms
+uncertainty <- uncertainty %>%
+  mutate(pm25raw = round((0.43 * concentration$PM25), 4))
+
+#Calculate PM2.5 uncertainties
+uncertainty <- uncertainty %>% 
+  mutate(PM25 = round((sqrt(((1/0.43)^2 *(2)^2) + (-(pm25raw)/(0.43)^2 )^2 * (0.05 * 0.43)^2)), 4))
+```
+
+I will remove the `pm25raw` variable and I will also add the `arm`, `fueltype` and `group` variables to this dataframe, and I'll save it as .CSV format.
+
+```{r}
+#First I will remove the pm25raw variable
+uncertainty <- uncertainty %>% select(-pm25raw)
+
+#Add the `arm`, `fueltype` and `group` variables to the `uncertainty` dataframe
+uncertainty <- uncertainty %>%
+  mutate(arm = hapin_filters$arm, fueltype = hapin_filters$fueltype, group = hapin_filters$group)
+```
+
+##Final Edits
+
+I used the `gg_miss_var()` function to check if there are any missing values from the concentrations file. (For the purpose of the final project and the personal project, any missing values will have to be removed).
+
+```{r}
+gg_miss_var(concentration)
+gg_miss_var(uncertainty)
+```
+
+There is one observation with missing PM2.5 and BC concentrations and uncertainties. After doing some research, there is no record that the data information from this filter is available, so the best decision was to drop this value. And then, save the df to a .CSV file.
+
+```{r}
+#Use na.omit() to remove the observation with missing value
+concentration <- na.omit(concentration)
+
+#Save the dataframes as CSV files
+write_csv(concentration, file = here("data", "processed-data", "concentration.csv"))
+write_csv(uncertainty, file = here("data", "processed-data", "uncertainty.csv"))
+```
+
+Finally, the files need to be saved for the PMF software, so I will remove unnecessary variables
+
+```{r}
+#Revmove arm, fueltype and group variables
+concentration_final <- concentration %>% select(-c(arm, fueltype, group))
+uncertainty_final <- uncertainty %>% select(-c(arm, fueltype, group))
+
+#Save files
+write_csv(concentration_final, file = here("data", "processed-data", "concentration_final.csv"))
+write_csv(uncertainty_final, file = here("data", "processed-data", "uncertainty_final.csv"))
+```
+
+DONE! :)
+
+PART BELOW IS PENDING, ONLY IF AMBIENT FILTERS WILL BE ANALYZED (NOT THE CASE FOR NOW)
+
+## Ambient filters processing
+
+### Ambient filters concentrations
+
+First, loading the ambient filter concentrations.
+
+```{r}
+#Loading the ambient filters chemical species concentration data
+ambient <- read_excel(here("data", "raw-data", "ambient_conc_unc_hapingt.xlsx"), sheet = "Concentration")
+```
+
+First, deleting the brackets, then I will convert these variables to numeric type and round them to 5 decimal digits.
+
+```{r}
+#Remove brackets, convert to numeric, and round to 4 decimal places
+ambient <- ambient %>%
+  mutate(across(2:25, ~ round(as.numeric(str_remove_all(., "\\[|\\]")), 5))) %>% 
+  rename(filter_id = "Filter")
+```
+
+Now, I will estimate which chemical species are representative, by filtering all the species with less than 50% of their values are below the detection limit.
+
+```{r}
+#Estimate the percentage of values below detection limit for each element
+bdl_ambient <- ambient %>%
+  summarise(
+    percent_bdl_mg = sum(Mg < 0.0051) / n() * 100,
+    percent_bdl_al = sum(Al < 0.0059) / n() * 100,
+    percent_bdl_si = sum(Si < 0.0068) / n() * 100,
+    percent_bdl_s = sum(S < 0.0026) / n() * 100,
+    percent_bdl_k = sum(K < 0.0040) / n() * 100,
+    percent_bdl_ca = sum(Ca < 0.0040) / n() * 100,
+    percent_bdl_ti = sum(Ti < 0.0086) / n() * 100,
+    percent_bdl_cr = sum(Cr < 0.0055) / n() * 100,
+    percent_bdl_mn = sum(Mn < 0.0030) / n() * 100,
+    percent_bdl_fe = sum(Fe < 0.0043) / n() * 100,
+    percent_bdl_ni = sum(Ni < 0.0043) / n() * 100,
+    percent_bdl_cu = sum(Cu < 0.0080) / n() * 100,
+    percent_bdl_zn = sum(Zn < 0.0024) / n() * 100,
+    percent_bdl_ga = sum(Ga < 0.0049) / n() * 100,
+    percent_bdl_as = sum(As < 0.0062) / n() * 100,
+    percent_bdl_se = sum(Se < 0.0181) / n() * 100,
+    percent_bdl_cd = sum(Cd < 0.0932) / n() * 100,
+    percent_bdl_in = sum(In < 0.1089) / n() * 100,
+    percent_bdl_sn = sum(Sn < 0.1844) / n() * 100,
+    percent_bdl_te = sum(Te < 0.2166) / n() * 100,
+    percent_bdl_i = sum(I < 0.3149) / n() * 100,
+    percent_bdl_pb = sum(Pb < 0.0324) / n() * 100,)
+
+print(bdl_ambient)
+```
+
+Only 6 elements have less than 50% of their observations below the detection limit. Now, I will filter the remaining elements (variables).
+
+```{r}
+#Select only the filter ID, type and the 10 elements that have more than 50% of their data not below the detection limit
+ambient <- ambient %>% select(c(filter_id, Mg, S, K, Ca, Fe, Zn)) %>% 
+  arrange(filter_id) #Also I decided to arrange them ascending based on the filter_id
+```
+
+Replace all values below the detection limit with (LOD/sqrt(2)).
+
+```{r}
+#Replace all values below the detection limit with DL/sqrt(2)
+ambient <- ambient %>% 
+    mutate(Mg = round(if_else(Mg < 0.0051, 0.0051 / sqrt(2), Mg), 4), S = round(if_else(S < 0.0026, 0.0026 / sqrt(2), S), 4),
+           K = round(if_else(K < 0.0016, 0.0016 / sqrt(2), K), 4), Ca = round(if_else(Ca < 0.0040, 0.0040 / sqrt(2), Ca), 4),
+           Fe = round(if_else(Fe < 0.0043, 0.0043 / sqrt(2), Fe), 4), Zn = round(if_else(Zn < 0.0024, 0.0024 / sqrt(2), Zn), 4))
+
+#I will save these concentrations in a new dataframe `concentrations_ugcm2` that will be used for uncertainty estimations in future steps
+amb_conc_ugcm2 <- ambient
+```
+
+And then, converting the concentrations from micrograms per square centimeter to micrograms per cubic meter using the equation: ug/m3 = (Concentration (ug/cm^2^) x Filter area (cm^2^))/Sample volume (m3). Where, the filter area is 12.56 cm^2^ and the sample volume is 2.75 m^3^.
+
+```{r}
+#Converting the concentrations from (ug/cm2) to (ug/m3)
+ambient <- ambient %>%
+  mutate(across(Mg:Zn, ~ round(.x * 12.56 / 2.75, 4)))
+```
+
+If possible, I will add the BC concentrations (they have to be estimated apparently). Then, save the dataframe in .CSV format
+
+### Ambient filters uncertainties
+
+First, loading the ambient filter concentrations.
+
+```{r}
+#Loading the ambient filters chemical species uncertainties data
+ambient_unc <- read_excel(here("data", "raw-data", "ambient_conc_unc_hapingt.xlsx"), sheet = "Uncertainty")
+```
+
+First, I will remove the chemical species with more than 50% of their values below detection limit, sort by Filter ID and round the values to numbers with five decimal places.
+
+```{r}
+ambient_unc <- ambient_unc %>% select(c(Filter, Mg, S, K, Ca, Fe, Zn)) %>% #Select only the necessary variables
+  rename(filter_id = "Filter") %>% #Rename the Filter column
+  mutate_at(vars(Mg:Zn), ~ round(., 5)) %>% #Round the uncertainties to 4 decimal places
+  arrange(filter_id) #Arrange observations based on Filter ID
+```
+
+Now, the uncertainties from the concentration values that were LOD adjusted have to be reestimated to (5/6)\*LOD. To do this I created a list that inputs the LOD values for each element, and then using `mutate()`, I make the changes only to the values that follow the specified condition.
+
+```{r}
+#Create a list for the detection limits for each element
+amb_dl <- c(Mg = 0.0051, S = 0.0026, K = 0.0016, Ca = 0.0040, Fe = 0.0043, Zn = 0.0024)
+
+# Recalculate the values in df based on the conditions
+ambient_unc <- ambient_unc %>%
+  mutate(across(all_of(names(amb_dl)),
+                ~ round(if_else(amb_conc_ugcm2[[cur_column()]] < amb_dl[[cur_column()]], (5/6) * amb_dl[[cur_column()]], .), 4),
+                .names = "{.col}"))
+```
+
+Finally, for all the chemical species, the uncertainties have to be reestimated so they correctly reflect the uncertainty for each variable used in the calculations. In this case, input the XRF-estimated concentration, filter area and filter volume uncertainties using the law of propagation of uncertainties. Also, the purpose of this section is to convert the uncertainties from ug/cm2 to ug/m3 to correctly reflect the units of the concentrations.
+
+```{r}
+# Define the variables to be recalculated
+ambient_variables <- c('Mg', 'S', 'K', 'Ca', 'Fe', 'Zn')
+
+# Recalculate the values using the given equation
+ambient_unc <- ambient_unc %>%
+  mutate(across(all_of(ambient_variables), ~ round( #Here, selecting all the variables to be re-calculated
+    sqrt((12.56/2.75)^2 * .^2 + (amb_conc_ugcm2[[cur_column()]]/2.75)^2 * 0.05^2 + (-amb_conc_ugcm2[[cur_column()]]*12.56/2.75^2)^2 * (0.05 * 2.75)^2), 4), .names = "{.col}")) #Input the equation
+```
+
+If possible, I will add the BC uncertainties, based on the BC concentrations that will apparently have to be estimated. Then, save the dataframe in .CSV format.
